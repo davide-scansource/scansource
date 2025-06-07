@@ -1,0 +1,22 @@
+on:
+  pull_request:
+    types:
+      - opened
+
+jobs:
+  lambdas:
+    name: Code
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Test Lambda codes
+        run: |
+          ./scripts/test-lambdas.sh
+
+      - name: Build Lambda Artifacts
+        run: |
+          ./scripts/create-lambda-artifacts.sh
+
