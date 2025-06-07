@@ -1,0 +1,73 @@
+on:
+  push:
+    branches:
+      - main        # staging environment
+      - production  # production environment
+
+jobs:
+  infrastructure:
+    name: Infrastructure
+    environment: ${{ github.ref == 'refs/heads/main' && 'staging' || 'production' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Environment variables
+        run: |
+          echo "Using AWS Region: ${{ vars.AWS_REGION }}"
+          echo "Using Resources Prefix: ${{ vars.RESOURCES_PREFIX }}"
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy Infrastructure
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ vars.RESOURCES_PREFIX }}-scansource
+          template: cloudformation/main.yaml
+          parameter-overrides: "ResourcePrefix=${{ vars.RESOURCES_PREFIX }}"
+          no-fail-on-empty-changeset: "1"
+  
+  lambdas:
+    needs: infrastructure
+    name: Code
+    environment: ${{ github.ref == 'refs/heads/main' && 'staging' || 'production' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Environment variables
+        run: |
+          echo "Using AWS Region: ${{ vars.AWS_REGION }}"
+          echo "Using Resources Prefix: ${{ vars.RESOURCES_PREFIX }}"
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Test Lambda codes
+        run: |
+          ./scripts/test-lambdas.sh
+
+      - name: Build Lambda Artifacts
+        run: |
+          ./scripts/create-lambda-artifacts.sh
+
+      - name: Deploy Lambda1
+        run: |
+          aws lambda update-function-code --function-name ${{ vars.RESOURCES_PREFIX }}-lambda1 --zip-file fileb://./artifacts/lambda1.zip
+
+      - name: Deploy Lambda2
+        run: |
+          aws lambda update-function-code --function-name ${{ vars.RESOURCES_PREFIX }}-lambda2 --zip-file fileb://./artifacts/lambda2.zip
