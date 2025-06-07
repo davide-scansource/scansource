@@ -1,0 +1,287 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  ResourcePrefix:
+    Description: The Prefix for the Resources
+    Type: String
+
+Resources:
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Join ['-', [!Ref ResourcePrefix, 'user-pool']]
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Join ['-', [!Ref ResourcePrefix, 'user-pool-client']]
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+
+  # Lambdas
+  LambdasBaseRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: LogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource: '*'
+
+  # Keep same name as the assessment but a more descriptive name could help
+  Lambda1:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdasBaseRole.Arn
+      FunctionName: !Join ['-', [!Ref ResourcePrefix, 'lambda1']]
+      Timeout: 30
+      # dummy code to setup the lambda the first time
+      Code:
+        ZipFile: |
+          exports.handler = async function(event) {
+            console.log('lambda1')
+            return {
+              statusCode: 200,
+              body: JSON.stringify('Hello from lambda1')
+            }
+          };
+      Runtime: nodejs20.x
+
+  # Keep same name as the assessment but a more descriptive name could help
+  Lambda2:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: lambda_function.handler
+      Role: !GetAtt LambdasBaseRole.Arn
+      FunctionName: !Join ['-', [!Ref ResourcePrefix, 'lambda2']]
+      Timeout: 30
+      # dummy code to setup the lambda the first time
+      Code:
+        ZipFile: |
+          import json
+
+          def handler(event, context):
+            print('hello from lambda2')
+            return {
+              'statusCode': 200,
+              'body': json.dumps('Hello from lambda2')
+            }
+      Runtime: python3.12
+
+  # API Gateway
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Join ['-', [!Ref ResourcePrefix, 'api']]
+      Description: API for assessment
+
+  # Custom gateway responses to pass custom headers to the client
+  GatewayResponseThrottled:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+      ResponseType: THROTTLED
+      RestApiId: !Ref ApiGateway
+      StatusCode: '429'
+
+  GatewayResponseUnauthorized:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+      ResponseType: UNAUTHORIZED
+      RestApiId: !Ref ApiGateway
+      StatusCode: '401'
+
+  # API Gateway Resources
+  ApiGatewayResourceLambda1:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      RestApiId: !Ref ApiGateway
+      PathPart: 'lambda1'
+
+  ApiGatewayResourceLambda2:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      RestApiId: !Ref ApiGateway
+      PathPart: 'lambda2'
+
+  # API Gateway Cognito Authorizer
+  CognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      RestApiId: !Ref ApiGateway
+      Type: COGNITO_USER_POOLS
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !GetAtt UserPool.Arn
+
+  # API Gateway Methods
+  Lambda1Method:
+    DependsOn: Lambda1
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      HttpMethod: GET
+      ResourceId: !Ref ApiGatewayResourceLambda1
+      RestApiId: !Ref ApiGateway
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations
+          - lambdaArn: !GetAtt Lambda1.Arn
+
+  Lambda2Method:
+    DependsOn: Lambda2
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      HttpMethod: GET
+      ResourceId: !Ref ApiGatewayResourceLambda2
+      RestApiId: !Ref ApiGateway
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${lambdaArn}/invocations
+          - lambdaArn: !GetAtt Lambda2.Arn
+
+  # API Gateway Methods for CORS
+  Lambda1EnableCors:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      ResourceId: !Ref ApiGatewayResourceLambda1
+      RestApiId: !Ref ApiGateway
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels: { "application/json": "Empty" }
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  Lambda2EnableCors:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      ResourceId: !Ref ApiGatewayResourceLambda2
+      RestApiId: !Ref ApiGateway
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels: { "application/json": "Empty" }
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  # API Gateway Deployment
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - Lambda1Method
+      - Lambda2Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+
+  ApiGatewayStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: api
+      RestApiId: !Ref ApiGateway
+      DeploymentId: !Ref ApiGatewayDeployment
+      MethodSettings:
+        - ResourcePath: /*
+          HttpMethod: '*'
+          # Very low limits to allow testing during the interview
+          ThrottlingBurstLimit: 2
+          ThrottlingRateLimit: 1
+
+  # Allow API Gateway to invoke Lambda functions
+  ApiLambda1Permission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - Lambda1Method
+      - Lambda2Method
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref Lambda1
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Join ["", ["arn:aws:execute-api:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":", !Ref "ApiGateway", "/*/GET/lambda1"]]
+
+  ApiLambda2Permission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - Lambda1Method
+      - Lambda2Method
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref Lambda2
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Join ["", ["arn:aws:execute-api:", Ref: "AWS::Region", ":", Ref: "AWS::AccountId", ":", !Ref "ApiGateway", "/*/GET/lambda2"]]
+
+Outputs:
+  ApiUrl:
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/api'
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
